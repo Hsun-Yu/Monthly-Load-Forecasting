@@ -1,7 +1,7 @@
 # %%
 from datetime import datetime
-
 from statsmodels.base.model import Model
+import os
 import database as db
 import time_series as ts
 import sqlalchemy

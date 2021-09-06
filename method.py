@@ -1,3 +1,4 @@
+from math import isnan
 import mlflow
 import numpy as np
 import database as db
@@ -26,14 +27,27 @@ class MidTermForecastMethod:
         pass
     
     def eval_metrics(self, actual, pred):
-        rmse = np.sqrt(mean_squared_error(actual, pred))
-        mae = mean_absolute_error(actual, pred)
-        mape = mean_absolute_percentage_error(actual, pred)
+        ac = []
+        pre = []
+        for i in actual.index:
+            if not np.isnan(actual["value"][i]) and not np.isnan(pred["value"][i]):
+                ac.append(actual["value"][i])
+                pre.append(pred["value"][i])
+        if len(ac) == 0 and len(pre) == 0:
+            return np.nan, np.nan, np.nan
+
+        rmse = np.sqrt(mean_squared_error(ac, pre))
+        mae = mean_absolute_error(ac, pre)
+        mape = mean_absolute_percentage_error(ac, pre)
         return rmse, mae, mape
 
     def performance_test(self, pred, test_from_date: datetime, test_to_date: datetime, train_from_date: datetime, train_to_date: datetime):
         target_load = db.get_monthly_load(db_conn=self.db_conn, from_date=test_from_date, to_date=test_to_date)
-        target_load = pd.DataFrame({'value': target_load['value'].values}, index=target_load['date'])
+        
+        # resize target length to be same as pred
+        padding_target = np.pad(target_load['value'].values, (0, pred.shape[0] - target_load.shape[0]), 'constant', constant_values=(None, None))
+        target_load = pd.DataFrame({'value': padding_target}, index=pred.index)
+
         target_load.index = pd.to_datetime(target_load.index)
         rmse, mae, mape = self.eval_metrics(actual=target_load, pred=pred)
         mlflow.log_metric("rmse", rmse)
@@ -55,7 +69,6 @@ class MidTermForecastMethod:
             mlflow.log_metric(str(m) + "_rmse", rmse)
             mlflow.log_metric(str(m) + "_mae", mae)
             mlflow.log_metric(str(m) + "_mape", mape)
-        print(pred)
         dt = pd.DataFrame({'actual': target_load['value'].values, 'predict': pred['value'].values}, index=target_load.index)
         dt.to_csv("output.csv")
         mlflow.log_artifact("output.csv")
@@ -112,11 +125,6 @@ class SeasonalARIMA(MidTermForecastMethod):
         super().performance_test(pred=pred, test_from_date=pred_from_date, test_to_date=pred_to_date, train_from_date=train_from_date, train_to_date=train_to_date)
         mlflow.end_run()
 
-    # def create_new_run(self):
-    #     self.__del__()
-    #     self.__init__(db_conn=self.db_conn, AR_lag=self.AR_lag, MA_lag=self.MA_lag, differencing_order=self.differencing_order, seasonal_period=self.seasonal_period)
-
-
     def __init__(self, db_conn, AR_lag: int, MA_lag: int, differencing_order: int, seasonal_period=12) -> None:
         super().__init__(db_conn=db_conn)
         self.AR_lag = AR_lag
@@ -125,8 +133,6 @@ class SeasonalARIMA(MidTermForecastMethod):
         self.seasonal_period = seasonal_period
         self.db_conn = db_conn
         # mlflow.statsmodels.autolog()
-
-    
 
 class TrendResidualARIMA(MidTermForecastMethod):
     def get_training_data(self, from_date: datetime, to_date: datetime):
@@ -190,3 +196,37 @@ class TrendResidualARIMA(MidTermForecastMethod):
         self.seasonal_period = seasonal_period
         
         self.db_conn = db_conn
+
+class JustAverage(MidTermForecastMethod):
+    def get_training_data(self, from_date: datetime, to_date: datetime):
+        load = db.get_monthly_load(db_conn=self.db_conn, from_date=from_date, to_date=to_date)
+        training_data = pd.DataFrame({'value': load['value'].values}, index=load['date'])
+        return training_data
+
+    def get_testing_input(self, from_date: datetime, to_date: datetime):
+        return None
+
+    def train(self, from_date: datetime, to_date: datetime):
+        training_data = self.get_training_data(from_date=from_date, to_date=to_date)
+        self.average = np.average(training_data["value"])
+
+    def forecast(self, from_date: datetime, to_date: datetime):
+        dates = pd.date_range(start=from_date, end=to_date, freq='MS')
+        pred = np.full((len(dates)), self.average)
+        pred = pd.DataFrame({'value': pred}, index=dates)
+        return pred
+
+    def performance_test(self, pred_from_date: datetime, pred_to_date: datetime, train_from_date: datetime, train_to_date: datetime):
+        tracking_uri = os.getenv("mlflow_tracking_uri")
+        mlflow.set_tracking_uri(tracking_uri)
+        mlflow.set_experiment("/just_average")
+        mlflow.start_run()
+        mlflow.log_param("method_name", "Just Average")
+        
+        self.train(from_date=train_from_date, to_date=train_to_date)
+        pred = self.forecast(from_date=pred_from_date, to_date=pred_to_date)
+        super().performance_test(pred=pred, test_from_date=pred_from_date, test_to_date=pred_to_date, train_from_date=train_from_date, train_to_date=train_to_date)
+        mlflow.end_run()
+
+    def __init__(self, db_conn) -> None:
+        super().__init__(db_conn)
