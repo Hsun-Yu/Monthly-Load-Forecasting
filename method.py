@@ -1,3 +1,4 @@
+# %%
 from math import isnan
 import mlflow
 import numpy as np
@@ -19,8 +20,8 @@ class MidTermForecastMethod:
         pass
 
     def train(self, from_date: datetime, to_date: datetime):
-        mlflow.log_param("Training set from", from_date.strftime("%Y-%m-%d"))
-        mlflow.log_param("Training set to", to_date.strftime("%Y-%m-%d"))
+        # mlflow.log_param("Training set from", from_date.strftime("%Y-%m-%d"))
+        # mlflow.log_param("Training set to", to_date.strftime("%Y-%m-%d"))
         print("Training finished!!")
     
     def plot_result(self):
@@ -100,7 +101,7 @@ class SeasonalARIMA(MidTermForecastMethod):
 
     def train(self, from_date: datetime, to_date: datetime):
         training_data = self.get_training_data(from_date=from_date, to_date=to_date)
-        self.model = ARIMA(training_data, seasonal_order=(self.AR_lag, self.differencing_order, self.MA_lag, self.seasonal_period), enforce_stationarity=False)
+        self.model = ARIMA(training_data, order=(self.AR_lag, self.differencing_order, self.MA_lag), seasonal_order=(self.seasonal_AR_lag, self.seasonal_differencing_order, self.seasonal_MA_lag, self.seasonal_period), enforce_stationarity=False)
         self.model = self.model.fit()
         # super().train(from_date=from_date, to_date=to_date)
 
@@ -118,6 +119,9 @@ class SeasonalARIMA(MidTermForecastMethod):
         mlflow.log_param("AR_lag", self.AR_lag)
         mlflow.log_param("MA_lag", self.MA_lag)
         mlflow.log_param("differencing_order", self.differencing_order)
+        mlflow.log_param("seasonal_AR_lag", self.seasonal_AR_lag)
+        mlflow.log_param("seasonal_MA_lag", self.seasonal_MA_lag)
+        mlflow.log_param("seasonal_differencing_order", self.seasonal_differencing_order)
         mlflow.log_param("seasonal_period", self.seasonal_period)
         
         self.train(from_date=train_from_date, to_date=train_to_date)
@@ -125,11 +129,15 @@ class SeasonalARIMA(MidTermForecastMethod):
         super().performance_test(pred=pred, test_from_date=pred_from_date, test_to_date=pred_to_date, train_from_date=train_from_date, train_to_date=train_to_date)
         mlflow.end_run()
 
-    def __init__(self, db_conn, AR_lag: int, MA_lag: int, differencing_order: int, seasonal_period=12) -> None:
+    def __init__(self, db_conn, AR_lag: int, MA_lag: int, differencing_order: int, 
+                    seasonal_AR_lag: int, seasonal_MA_lag: int, seasonal_differencing_order: int,seasonal_period=12) -> None:
         super().__init__(db_conn=db_conn)
         self.AR_lag = AR_lag
         self.MA_lag = MA_lag
         self.differencing_order = differencing_order
+        self.seasonal_AR_lag = seasonal_AR_lag
+        self.seasonal_MA_lag = seasonal_MA_lag
+        self.seasonal_differencing_order = seasonal_differencing_order
         self.seasonal_period = seasonal_period
         self.db_conn = db_conn
         # mlflow.statsmodels.autolog()
@@ -179,11 +187,6 @@ class TrendResidualARIMA(MidTermForecastMethod):
         super().performance_test(pred=pred, test_from_date=pred_from_date, test_to_date=pred_to_date, train_from_date=train_from_date, train_to_date=train_to_date)
         mlflow.end_run()
 
-    # def create_new_run(self):
-    #     self.__del__()
-    #     self.__init__(db_conn=self.db_conn, AR_lag=self.AR_lag, MA_lag=self.MA_lag, differencing_order=self.differencing_order, seasonal_period=self.seasonal_period)
-
-
     def __init__(self, db_conn, trend_AR_lag: int, trend_MA_lag: int, trend_differencing_order: int, 
                                 resid_AR_lag: int, resid_MA_lag: int, resid_differencing_order: int, seasonal_period: int) -> None:
         super().__init__(db_conn=db_conn)
@@ -230,3 +233,52 @@ class JustAverage(MidTermForecastMethod):
 
     def __init__(self, db_conn) -> None:
         super().__init__(db_conn)
+
+class TrendResidualMixARIMA(MidTermForecastMethod):
+    def get_training_data(self, from_date: datetime, to_date: datetime):
+        load = db.get_monthly_load(db_conn=self.db_conn, from_date=from_date, to_date=to_date)
+        training_data = pd.DataFrame({'value': load['value'].values}, index=load['date'])
+        return training_data
+
+    def get_testing_input(self, from_date: datetime, to_date: datetime):
+        return None
+
+    def train(self, from_date: datetime, to_date: datetime):
+        training_data = self.get_training_data(from_date=from_date, to_date=to_date)
+        train_decomp = ts.X11(time_series=training_data, period=self.seasonal_period)
+        self.trend = train_decomp.trend.fillna(0)
+        self.seasonal = train_decomp.seasonal.fillna(0)
+        self.residual = train_decomp.resid.fillna(0)
+        self.model = ARIMA(self.trend + self.residual, order=(self.AR_lag, self.differencing_order, self.MA_lag))
+        self.model = self.model.fit()
+
+    def forecast(self, from_date: datetime, to_date: datetime):
+        pred = self.model.predict(from_date, to_date)
+        pred = pd.DataFrame({'value': pred + self.seasonal[:12].values}, index=pred.index)
+        return pred
+
+    def performance_test(self, pred_from_date: datetime, pred_to_date: datetime, train_from_date: datetime, train_to_date: datetime):
+        load_dotenv()
+        tracking_uri = os.getenv("mlflow_tracking_uri")
+        mlflow.set_tracking_uri(tracking_uri)
+        mlflow.set_experiment("/trend_residual_mix_ARIMA")
+        mlflow.start_run()
+        mlflow.log_param("method_name", "Trend Residual Mix ARIMA")
+        mlflow.log_param("AR_lag", self.AR_lag)
+        mlflow.log_param("MA_lag", self.MA_lag)
+        mlflow.log_param("differencing_order", self.differencing_order)
+        mlflow.log_param("seasonal_period", self.seasonal_period)
+        self.train(from_date=train_from_date, to_date=train_to_date)
+        pred = self.forecast(from_date=pred_from_date, to_date=pred_to_date)
+        super().performance_test(pred=pred, test_from_date=pred_from_date, test_to_date=pred_to_date, train_from_date=train_from_date, train_to_date=train_to_date)
+        mlflow.end_run()
+
+    def __init__(self, db_conn, AR_lag: int, MA_lag: int, differencing_order: int, seasonal_period: int) -> None:
+        super().__init__(db_conn=db_conn)
+        self.AR_lag = AR_lag
+        self.MA_lag = MA_lag
+        self.differencing_order = differencing_order
+        self.seasonal_period = seasonal_period
+        
+        self.db_conn = db_conn
+# %%

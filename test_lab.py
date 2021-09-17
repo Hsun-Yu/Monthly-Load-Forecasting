@@ -35,7 +35,7 @@ train_load = db.get_monthly_load(db_conn=conn, from_date=datetime(2010, 1, 1), t
 # target_load = target_load.set_index(["date"])
 x = pd.DataFrame({'value': train_load['value'].values}, index=train_load['date'])
 
-train_decomp = ts.X11(time_series=x)
+train_decomp = ts.X11(time_series=x, plot=True)
 train_trend = train_decomp.trend.fillna(0)
 train_seasonal = train_decomp.seasonal.fillna(0)
 train_residual = train_decomp.resid.fillna(0)
